@@ -2,17 +2,9 @@ import pandas as pd
 import re
 import io
 import numpy as np
-import email.utils
-import imaplib
-import smtplib
-import email
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
 import os
 # print(os.getcwd())
-# os.chdir('/Users/nguyenviet/Desktop/Gincor/data-01')
+# os.chdir('/Users/nguyenviet/Desktop/Gincor/Email/data-01')
 
 # ==========================================
 # 1. CLEANING FUNCTIONS
@@ -21,12 +13,29 @@ import os
 def clean_dish_d(file_path):
     print(f"Processing Sales Transactions ({file_path})...")
     
+    # Check if file is already cleaned (CSV format) or raw format
+    with open(file_path, 'r', encoding='latin1') as f:
+        first_line = f.readline().strip()
+    
+    # If first line looks like a CSV header, it's already cleaned
+    if 'TRANS_TYPE' in first_line and 'DATE' in first_line:
+        print("  (Loading pre-cleaned CSV format)")
+        df = pd.read_csv(file_path, encoding='latin1')
+        df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
+        # Ensure numeric columns are proper type
+        for col in ['QTY', 'NET_PR', 'COST_PR', 'CORE_PR']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        # Clean string columns
+        df['ACC_NUM'] = df['ACC_NUM'].astype(str).str.strip()
+        df['PART_NUM'] = df['PART_NUM'].astype(str).str.strip()
+        df['LINE_CODE'] = df['LINE_CODE'].astype(str).str.upper().str.strip()
+        return df
+    
+    # Otherwise, parse raw format
+    print("  (Parsing raw format)")
     data_pattern = re.compile(r'^[A-Za-z]\s?,\s?\d{2}-\d{2}-\d{2}')
     cleaned_rows = []
-    
-    # Adjusted Headers (Removed S_REP)
-    # Original: CODE, DATE, INV#, ACC#, S_REP, QTY, LINE, PART#, DESCR, NET, COST, CORE
-    # We will read all 12, then drop S_REP later
     
     with open(file_path, 'r', encoding='latin1') as f:
         for line in f:
@@ -115,6 +124,10 @@ def clean_ireport(file_path):
     
     if 'PART NO.' in df.columns:
         df['PART_NUM'] = df['PART NO.'].str.strip()
+    
+    # CRITICAL: Remove duplicate part numbers (keep first occurrence)
+    # This prevents creating duplicate rows when merging with sales data
+    df = df.drop_duplicates(subset=['PART_NUM'], keep='first')
         
     return df[['PART_NUM', 'Description']]
 
@@ -244,7 +257,6 @@ WFC,WEATHERHEAD FLUID CONNECT
 WHH,HYDRAULIC HOSE"""
     return pd.read_csv(io.StringIO(data))
 
-
 # ==========================================
 # 2. MAIN EXECUTION
 # ==========================================
@@ -304,8 +316,10 @@ def main():
     master['PERIOD'] = master['DATE'].apply(get_fiscal_period)
     
     # 6. Calculations
-    master['TOTAL_REVENUE'] = master['QTY'] * master['NET_PR']
-    master['TOTAL_COST'] = master['QTY'] * master['COST_PR']
+    # FIX: Use absolute value of prices to prevent negative qty × negative price = positive result
+    # For credits/returns, QTY is negative and should drive the final sign
+    master['TOTAL_REVENUE'] = master['QTY'] * master['NET_PR'].abs()
+    master['TOTAL_COST'] = master['QTY'] * master['COST_PR'].abs()
     master['GROSS_PROFIT'] = master['TOTAL_REVENUE'] - master['TOTAL_COST']
     
     master['MARGIN_PERCENT'] = np.where(
@@ -324,13 +338,21 @@ def main():
     ]
     
     # Filter to only existing columns and sort
-    df_final = master[final_columns].sort_values(by='DATE', ascending=False)
+    existing_columns = [col for col in final_columns if col in master.columns]
+    df_final = master[existing_columns].sort_values(by='DATE', ascending=False)
     
-    # Format Margin as percentage (round to 4 decimal places, e.g., 0.2500 for 25%)
+    # Round numeric columns to appropriate decimal places
+    df_final['QTY'] = df_final['QTY'].round(2)
+    df_final['NET_PR'] = df_final['NET_PR'].round(2)
+    df_final['COST_PR'] = df_final['COST_PR'].round(2)
+    df_final['TOTAL_REVENUE'] = df_final['TOTAL_REVENUE'].round(2)
+    df_final['TOTAL_COST'] = df_final['TOTAL_COST'].round(2)
+    df_final['GROSS_PROFIT'] = df_final['GROSS_PROFIT'].round(2)
     df_final['MARGIN_PERCENT'] = df_final['MARGIN_PERCENT'].round(4) 
 
     # 7. Save
-    output_file = 'Master_Sales_Report.csv'
+    # output_file = 'Master_Sales_Report.csv'
+    output_file = os.path.join(os.getcwd(), 'Master_Sales_Report.csv')
     df_final.to_csv(output_file, index=False, encoding='utf-8-sig')
     
     print(f"\nSUCCESS! Saved to {output_file}")
